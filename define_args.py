@@ -127,7 +127,8 @@ def custom_args(
     # tune.Tuner options.
     parser.add_argument(
         "--no-tune",
-        action="store_true",
+        type=bool,
+        default=True,
         help="Whether to NOT use tune.Tuner(), but rather a simple for-loop calling "
         "`algo.train()` repeatedly until one of the stop criteria is met.",
     )
