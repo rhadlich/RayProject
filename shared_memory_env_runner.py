@@ -29,30 +29,31 @@ from multiprocessing import shared_memory
 import Minion
 import struct
 import ray
-from numba import njit
 
 
 # Helper functions
-def get_indices(buf) -> tuple:
+def get_indices(buf_arr) -> tuple:
     """Return (write_idx, read_idx)."""
-    return struct.unpack_from("<II", buf, 0)
+    # return struct.unpack_from("<II", buf, 0)
+    return buf_arr[:2].astype(np.int32)
 
 
-def set_indices(buf, w, r) -> shared_memory.SharedMemory.buf:
+def set_indices(buf_arr, w, r) -> shared_memory.SharedMemory.buf:
     """Atomically update both indices (optionally split these)."""
-    return struct.pack_into("<II", buf, 0, w, r)
+    # return struct.pack_into("<II", buf, 0, w, r)
+    buf_arr[:2] = [w, r]
 
 
 @ray.remote(num_cpus=1)
 def _run_minion(policy_shm_name: str,
                 flag_shm_name: str,
-                episode_shm_name: str,
+                ep_arr: np.ndarray,
                 episode_shm_properties: dict
                 ) -> None:
     """
     Thin wrapper that just calls minion to execute in a separate CPU core.
     """
-    Minion.main(policy_shm_name, flag_shm_name, episode_shm_name, episode_shm_properties)
+    Minion.main(policy_shm_name, flag_shm_name, ep_arr, episode_shm_properties)
 
 
 class SharedMemoryEnvRunner(EnvRunner):
@@ -118,18 +119,21 @@ class SharedMemoryEnvRunner(EnvRunner):
         self.HEADER_SIZE = self.config.env_config["ep_shm_properties"]["HEADER_SIZE"]
         self.HEADER_SLOT_SIZE = self.config.env_config["ep_shm_properties"]["HEADER_SLOT_SIZE"]
         self.SLOT_SIZE = self.config.env_config["ep_shm_properties"]["SLOT_SIZE"]
-        self.TOTAL_SIZE = self.config.env_config["ep_shm_properties"]["TOTAL_SIZE"]
+        self.TOTAL_SIZE_BYTES = self.config.env_config["ep_shm_properties"]["TOTAL_SIZE_BYTES"]
         self.STATE_ACTION_DIMS = self.config.env_config["ep_shm_properties"]["STATE_ACTION_DIMS"]
+        self.BYTES_PER_FLOAT = self.config.env_config["ep_shm_properties"]["BYTES_PER_FLOAT"]
         self.episode_shm = shared_memory.SharedMemory(
             create=True,
             name=self.config.env_config["ep_shm_properties"].get("name", 'episodes'),
-            size=self.TOTAL_SIZE
+            size=self.TOTAL_SIZE_BYTES
         )
         self.ep_buf = self.episode_shm.buf
+        self.ep_arr = np.frombuffer(self.ep_buf, dtype=np.float32)
         self.episode_shm_name = self.episode_shm.name
 
         # Initialize the write and read indices in the episode buffer to 0
-        struct.pack_into("<II", self.ep_buf, 0, 0, 0)  # write_idx=0, read_idx=0
+        self.ep_arr[:2] = 0
+        # struct.pack_into("<II", self.ep_buf, 0, 0, 0)  # write_idx=0, read_idx=0
 
         # Spawn minion subprocess. Decided to go with ray task because it's convenient. This approach can split the
         # workload in the Raspberry Pi to be: 1 core Algorithm/Learner, 1 core EnvRunner, 1 core Minion (environment),
@@ -137,7 +141,7 @@ class SharedMemoryEnvRunner(EnvRunner):
         self._minion_ref = _run_minion.remote(
             self.policy_shm_name,
             self.flag_shm_name,
-            self.episode_shm_name,
+            self.ep_arr,
             self.config.env_config["ep_shm_properties"],
         )
 
@@ -260,6 +264,7 @@ class SharedMemoryEnvRunner(EnvRunner):
             self.flag_shm.close()
             self.flag_shm.unlink()
         if self.episode_shm:
+            del self.ep_arr
             self.episode_shm.close()
             self.episode_shm.unlink()
         if ray.wait([self._minion_ref], timeout=0)[0]:
@@ -337,7 +342,7 @@ class SharedMemoryEnvRunner(EnvRunner):
         │       └ same as rollout[0]                           │
         └──────────────────────────────────────────────────────┘
         """
-        write_idx, read_idx = get_indices(self.ep_buf)
+        write_idx, read_idx = get_indices(self.ep_arr)
         # if any of these are true it means the last batch read is the most updated full batch
         if write_idx == read_idx or write_idx == read_idx+1 or (write_idx == 0 and read_idx == self.NUM_SLOTS-1):
             return None  # ring empty
@@ -355,20 +360,19 @@ class SharedMemoryEnvRunner(EnvRunner):
         for i in range(num_batches):
             # assert that the batch/slot is full
             slot_off = self.HEADER_SIZE + read_idx * self.SLOT_SIZE
-            filled = struct.unpack_from("<H", self.ep_buf, slot_off)[0]
+            filled = int(self.ep_arr[slot_off])
             assert filled == self.BATCH_SIZE
 
             # extract data from ring
             data_start = slot_off + self.HEADER_SLOT_SIZE
-            raw = bytes(self.ep_buf[data_start: data_start + self.PAYLOAD_SIZE])    # get raw array in bytes
-            payload = np.frombuffer(raw, dtype=np.float32)      # convert raw array to np vector
+            payload = np.copy(self.ep_arr[data_start: data_start + self.PAYLOAD_SIZE])  # extract data from array
 
             # extract initial state from front of payload and remove it so that shape is consistent for next step
             initial_state = payload[:self.STATE_ACTION_DIMS["state"]]
             payload = np.delete(payload, np.arange(self.STATE_ACTION_DIMS["action"]))
 
             # reshape data and add truncated and terminated fields
-            flat = np.frombuffer(payload, dtype=np.float32).reshape(self.BATCH_SIZE, self.ELEMENTS_PER_ROLLOUT)
+            payload = payload.reshape(self.BATCH_SIZE, self.ELEMENTS_PER_ROLLOUT)
             terminateds = np.zeros(self.BATCH_SIZE, dtype=np.bool_)
             truncateds = np.zeros(self.BATCH_SIZE, dtype=np.bool_)
             truncateds[-1] = True
@@ -380,14 +384,14 @@ class SharedMemoryEnvRunner(EnvRunner):
             )
 
             # add initial state
-            batch.add_env_reset(np.frombuffer(initial_state, dtype=np.float32))
+            batch.add_env_reset(initial_state)
 
             # add one rollout at a time (i.e. one row in flat)
-            for j in flat:
+            for j in payload:
                 batch.add_env_step(
-                    observation=flat[j, 0:self.STATE_ACTION_DIMS["state"]],     # observation !AFTER! taking "action"
-                    action=flat[j, self.STATE_ACTION_DIMS["state"]:self.STATE_ACTION_DIMS["action"]],
-                    reward=flat[j, self.STATE_ACTION_DIMS["action"]:self.STATE_ACTION_DIMS["reward"]],
+                    observation=payload[j, 0:self.STATE_ACTION_DIMS["state"]],     # observation !AFTER! taking "action"
+                    action=payload[j, self.STATE_ACTION_DIMS["state"]:self.STATE_ACTION_DIMS["action"]],
+                    reward=payload[j, self.STATE_ACTION_DIMS["action"]:self.STATE_ACTION_DIMS["reward"]],
                     terminated=terminateds[j],
                     truncated=truncateds[j],
                 )

@@ -4,7 +4,6 @@ import struct
 import onnxruntime as ort
 import time
 import gzip
-from numba import njit
 
 from ray.rllib.utils.numpy import softmax
 import gymnasium as gym
@@ -28,11 +27,11 @@ def _get_ort_session(buf: shared_memory.SharedMemory.buf):
 
 
 def write_fragment(data: np.ndarray,
-                   buf: shared_memory.SharedMemory.buf,
-                   ep_properties: dict,
+                   buf_arr: np.ndarray,
+                   episode_shm_properties: dict,
                    *,
                    is_initial_state: bool = False,
-                   ) -> shared_memory.SharedMemory.buf:
+                   ) -> np.ndarray:
     """
     Append ONE rollout into the ring buffer.
     Drops the oldest slot if ring is full.
@@ -66,7 +65,7 @@ def write_fragment(data: np.ndarray,
     Slot k (size = HEADER_SLOT_SIZE + PAYLOAD_SIZE)
     ┌──────────────────────────────────────────────────────┐
     │ HEADER_SLOT_SIZE bytes:                              │
-    │   • filled_count  (uint16)      ← how many rollouts  │
+    │   • filled_count  (float32)      ← how many rollouts │
     │                        (# of rollouts,not byte count)│
     ├──────────────────────────────────────────────────────┤
     │ PAYLOAD_SIZE bytes:                                  │
@@ -81,67 +80,67 @@ def write_fragment(data: np.ndarray,
     │       └ same as rollout[0]                           │
     └──────────────────────────────────────────────────────┘
     """
-    if is_initial_state:
-        assert data.shape == (ep_properties["STATE_ACTION_DIMS"]["state"],) and data.dtype == np.float32
-    else:
-        assert data.shape == (ep_properties["ELEMENTS_PER_ROLLOUT"],) and data.dtype == np.float32
-    raw = data.tobytes()
 
-    write_idx, read_idx = get_indices(buf)
-    slot_off = ep_properties["HEADER_SIZE"] + write_idx * ep_properties["SLOT_SIZE"]
+    if is_initial_state:
+        assert data.shape == (episode_shm_properties["STATE_ACTION_DIMS"]['state'],) and data.dtype == np.float32
+    else:
+        assert data.shape == (episode_shm_properties["ELEMENTS_PER_ROLLOUT"],) and data.dtype == np.float32
+
+    write_idx, read_idx = get_indices(buf_arr)
+    slot_off = episode_shm_properties["HEADER_SIZE"] + write_idx * episode_shm_properties["SLOT_SIZE"]
 
     # only run this the very first time the episode buffer is started,
     # for other iterations the function already handles adding the initial state
     if is_initial_state:
-        initial_state_off = slot_off + ep_properties["HEADER_SLOT_SIZE"]
-        buf[initial_state_off: initial_state_off + len(raw)] = raw
-        return buf
+        initial_state_off = slot_off + episode_shm_properties["HEADER_SLOT_SIZE"]
+        buf_arr[initial_state_off: initial_state_off + len(data)] = data
+        return buf_arr
 
-    filled = struct.unpack_from("<H", buf, slot_off)[0]  # uint16 count
+    # get how many rollouts have been filled in the current episode
+    filled = int(buf_arr[slot_off])
 
     # Copy rollout into slot payload
-    episode_off = slot_off + ep_properties["HEADER_SLOT_SIZE"] + filled * ep_properties["BYTES_PER_ROLLOUT"]
+    episode_off = slot_off + episode_shm_properties["HEADER_SLOT_SIZE"] + filled * episode_shm_properties[
+        "ELEMENTS_PER_ROLLOUT"]
     # Add initial state to offset
-    episode_off += ep_properties["STATE_ACTION_DIMS"]["state"] * int(ep_properties["BYTES_PER_ROLLOUT"]/ep_properties["ELEMENTS_PER_ROLLOUT"])
-    buf[episode_off: episode_off + ep_properties["BYTES_PER_ROLLOUT"]] = raw
+    episode_off += episode_shm_properties["STATE_ACTION_DIMS"]['state']
+    buf_arr[episode_off: episode_off + episode_shm_properties["ELEMENTS_PER_ROLLOUT"]] = data
 
     # Increment fill counter
     filled += 1
-    struct.pack_into("<H", buf, slot_off, filled)
+    buf_arr[slot_off] = filled
 
     # If this is the last rollout that can be added to this slot -> move write_idx to next slot and populate the
     # first elements as the initial state (equal to last state of current write_idx).
-    if filled == ep_properties["BATCH_SIZE"]:
-        print(f"Current write_idx: {write_idx}")
-        next_w = (write_idx + 1) % ep_properties["NUM_SLOTS"]
+    if filled == episode_shm_properties["BATCH_SIZE"]:
+        next_w = (write_idx + 1) % episode_shm_properties["NUM_SLOTS"]
         if next_w == read_idx:  # ring full → drop oldest
-            read_idx = (read_idx + 1) % ep_properties["NUM_SLOTS"]
+            read_idx = (read_idx + 1) % episode_shm_properties["NUM_SLOTS"]
 
         # get offset for next slot
         write_idx = next_w
-        slot_off = ep_properties["HEADER_SIZE"] + write_idx * ep_properties["SLOT_SIZE"]
+        slot_off = episode_shm_properties["HEADER_SIZE"] + write_idx * episode_shm_properties["SLOT_SIZE"]
 
         # extract last state from current rollout (raw)
-        state_off = (len(raw) - ep_properties["STATE_ACTION_DIMS"]["state"] *
-                     int(ep_properties["BYTES_PER_ROLLOUT"] / ep_properties["ELEMENTS_PER_ROLLOUT"]))
-        state_bytes = raw[state_off:]
+        state_off = len(data) - episode_shm_properties["STATE_ACTION_DIMS"]['state']
+        state = data[state_off:]
 
         # add starting state to next slot
-        initial_state_off = slot_off + ep_properties["HEADER_SLOT_SIZE"]
-        buf[initial_state_off: initial_state_off + len(state_bytes)] = state_bytes
+        initial_state_off = slot_off + episode_shm_properties["HEADER_SLOT_SIZE"]
+        buf_arr[initial_state_off: initial_state_off + len(state)] = state
 
         # reset the fill counter to include initial state
-        struct.pack_into("<H", buf, slot_off, 0)
+        buf_arr[slot_off] = 0
 
     # Commit updated indices
-    buf = set_indices(buf, write_idx, read_idx)
+    set_indices(buf_arr, write_idx, read_idx)
 
-    return buf
+    return buf_arr
 
 
 def main(policy_shm_name: str,
          flag_shm_name: str,
-         episode_shm_name: str,
+         ep_arr: np.ndarray,
          episode_shm_properties: dict,
          ):
     """
@@ -165,23 +164,21 @@ def main(policy_shm_name: str,
 
     """
     # connect to shared memory
-    f_shm = shared_memory.SharedMemory(name=flag_shm_name, create=False)    # this one has to be first
+    f_shm = shared_memory.SharedMemory(name=flag_shm_name, create=False)  # this one has to be first
     f_buf = f_shm.buf
-    while f_buf[0] == 1:    # wait until other shared memory blocks have been created
+    while f_buf[0] == 1:  # wait until other shared memory blocks have been created
         time.sleep(0.01)
 
     p_shm = shared_memory.SharedMemory(name=policy_shm_name, create=False)
-    e_shm = shared_memory.SharedMemory(name=episode_shm_name, create=False)
 
     # get buffers
     p_buf = p_shm.buf
-    e_buf = e_shm.buf
 
     # get initial network weights
-    while f_buf[1] == 0:    # wait until weights-available flag is set to true
+    while f_buf[1] == 0:  # wait until weights-available flag is set to true
         time.sleep(0.01)
     ort_session, output_names = _get_ort_session(p_buf)
-    f_buf[1] = 0            # change new-weights-available flag to false
+    f_buf[1] = 0  # change new-weights-available flag to false
 
     # initialize environment (gym.Env or socket to LabVIEW)
     # get env.reset() also, meaning system's initial state observation
@@ -189,10 +186,10 @@ def main(policy_shm_name: str,
     obs, info = env.reset()
 
     # write initial state to episode buffer
-    e_buf = write_fragment(obs,
-                           e_buf,
-                           episode_shm_properties,
-                           is_initial_state=True)
+    write_fragment(obs,
+                   ep_arr,
+                   episode_shm_properties,
+                   is_initial_state=True)
 
     timesteps = 0
 
@@ -204,7 +201,7 @@ def main(policy_shm_name: str,
             logits = ort_session.run(
                 output_names,
                 {"obs": np.array([obs], np.float32)},
-            )[0][0]     # first [0] -> selects "output". second [0] -> selects 0th batch
+            )[0][0]  # first [0] -> selects "output". second [0] -> selects 0th batch
 
             # stochastic sample of actions (for discrete action space only)
             action_probs = softmax(logits)
@@ -216,14 +213,14 @@ def main(policy_shm_name: str,
 
             # write data from current rollout to episode buffer
             current_packet = np.array([action, reward, obs], dtype=np.float32)
-            e_buf = write_fragment(current_packet, e_buf, episode_shm_properties)
+            write_fragment(current_packet, ep_arr, episode_shm_properties, )
 
             # update policy network weights if available and not being written to
             if f_buf[1] == 1 and f_buf[0] == 0:
-                f_buf[0] = 1        # set lock flag to locked
-                ort_session, output_names = _get_ort_session(p_buf)     # get ort session with new weights
-                f_buf[0] = 0        # set lock flag to unlocked
-                f_buf[1] = 0        # reset weights-available flag to 0 (false, i.e. no new weights)
+                f_buf[0] = 1  # set lock flag to locked
+                ort_session, output_names = _get_ort_session(p_buf)  # get ort session with new weights
+                f_buf[0] = 0  # set lock flag to unlocked
+                f_buf[1] = 0  # reset weights-available flag to 0 (false, i.e. no new weights)
 
             # if environment is the physical engine, wait for new state update and reward
 
@@ -232,8 +229,6 @@ def main(policy_shm_name: str,
     except KeyboardInterrupt:
         # close socket connection
         print("Program interrupted")
-
-
 
 # if __name__ == '__main__':
 #     import argparse

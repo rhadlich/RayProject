@@ -62,11 +62,11 @@ if __name__ == "__main__":
     BYTES_PER_ROLLOUT = ELEMENTS_PER_ROLLOUT * bytes_per_float
     # Added state*bytes to PAYLOAD_SIZE because need to include the starting state for each episode. This will be simply
     # the state observation at the end of the last episode/batch.
-    PAYLOAD_SIZE = BYTES_PER_ROLLOUT * BATCH_SIZE + dims["state"] * bytes_per_float
-    HEADER_SIZE = 8  # write_idx + read_idx (uint32 each)
-    HEADER_SLOT_SIZE = 2  # uint16: how many rollouts already in slot
+    PAYLOAD_SIZE = ELEMENTS_PER_ROLLOUT * BATCH_SIZE + dims["state"]
+    HEADER_SIZE = 2  # write_idx, read_idx
+    HEADER_SLOT_SIZE = 1  # one float32 to store how many rollouts already in slot
     SLOT_SIZE = HEADER_SLOT_SIZE + PAYLOAD_SIZE
-    TOTAL_SIZE = HEADER_SIZE + NUM_SLOTS * SLOT_SIZE
+    TOTAL_SIZE_BYTES = (HEADER_SIZE + NUM_SLOTS * SLOT_SIZE) * bytes_per_float
 
     ep_shm_properties = {
         "BATCH_SIZE": BATCH_SIZE,
@@ -77,8 +77,9 @@ if __name__ == "__main__":
         "HEADER_SIZE": HEADER_SIZE,
         "HEADER_SLOT_SIZE": HEADER_SLOT_SIZE,
         "SLOT_SIZE": SLOT_SIZE,
-        "TOTAL_SIZE": TOTAL_SIZE,
+        "TOTAL_SIZE_BYTES": TOTAL_SIZE_BYTES,
         "STATE_ACTION_DIMS": dims,
+        "BYTES_PER_FLOAT": bytes_per_float,
         "name": "episodes"
     }
 
