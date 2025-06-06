@@ -1,6 +1,7 @@
 from collections import defaultdict
 from typing import DefaultDict, List, Optional, Union, Collection
 
+import gymnasium as gym
 import numpy as np
 import torch
 import os
@@ -15,7 +16,7 @@ from ray.rllib.core import (
     COMPONENT_ENV_TO_MODULE_CONNECTOR,
     COMPONENT_MODULE_TO_ENV_CONNECTOR
 )
-from ray.rllib.env import INPUT_ENV_SPACES
+from ray.rllib.env import INPUT_ENV_SPACES, INPUT_ENV_SINGLE_SPACES
 from ray.rllib.env.env_runner import EnvRunner
 from ray.rllib.utils.framework import get_device
 from ray.rllib.utils.checkpoints import Checkpointable
@@ -113,13 +114,16 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
         self.worker_index: int = kwargs.get("worker_index")
         self.spaces = kwargs.get("spaces", {})
 
-        self.logger.debug(f"EnvRunner: spaces -> {self.spaces}")
-
         # Set device.
         self._device = get_device(
             self.config,
             0 if not self.worker_index else self.config.num_gpus_per_env_runner,
         )
+
+        # dummy method to populate self.spaces to stay consistent with SingleAgentEnvRunner
+        self.make_env()
+
+        self.logger.debug(f"EnvRunner: spaces -> {self.spaces}")
 
         # from SingleAgentEnvRunner
         # Create the env-to-module connector pipeline.
@@ -136,6 +140,7 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
         self.worker_index: int = kwargs.get("worker_index", 0)
 
         self._weights_seq_no = 0
+        self.weight_update_no = 0
 
         # Build the module from its spec.
         module_spec = self.config.get_rl_module_spec(
@@ -374,7 +379,7 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
         return state
 
     def set_state(self, state: StateDict) -> None:
-        self.logger.debug("EnvRunner: Called set_state()")
+        # self.logger.debug("EnvRunner: Called set_state()")
         # Update the RLModule state.
         if COMPONENT_RL_MODULE in state:
             # A missing value for WEIGHTS_SEQ_NO or a value of 0 means: Force the
@@ -385,11 +390,17 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
             # if the weights of this `EnvRunner` lacks behind the actual ones.
             if weights_seq_no == 0 or self._weights_seq_no < weights_seq_no:
                 rl_module_state = state[COMPONENT_RL_MODULE]
+                # this was needed because ray was passing an object reference after
+                # the first iteration to lower latency. need to dereference
+                if isinstance(rl_module_state, ray.ObjectRef):
+                    rl_module_state = ray.get(rl_module_state)
+
                 if (
                     isinstance(rl_module_state, dict)
                     and DEFAULT_MODULE_ID in rl_module_state
                 ):
                     rl_module_state = rl_module_state[DEFAULT_MODULE_ID]
+
                 self.module.set_state(rl_module_state)
 
                 # send new weights to minion
@@ -410,6 +421,12 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
 
                     self.logger.debug("EnvRunner: policy shm updated")
 
+                    # set weights-available flag to 1 (true) so that minion can update
+                    self.f_buf[1] = 1
+
+                    self.weight_update_no += 1
+                    self.logger.debug(f"EnvRunner: number of weight updates -> {self.weight_update_no}")
+
             # Update our weights_seq_no, if the new one is > 0.
             if weights_seq_no > 0:
                 self._weights_seq_no = weights_seq_no
@@ -422,6 +439,15 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
                     reduce="sum",
                     with_throughput=True,
                 )
+
+    def make_env(self):
+        # Do NOT instantiate a Gym env – sampling happens in the minion.
+        self.env = None
+        self.num_envs = 0
+        self.spaces = {
+            INPUT_ENV_SINGLE_SPACES: (self.config.observation_space,
+                                      self.config.action_space)
+        }
 
     def get_ctor_args_and_kwargs(self):
         return (

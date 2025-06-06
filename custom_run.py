@@ -25,6 +25,7 @@ import numpy as np
 from multiprocessing import shared_memory
 
 import ray
+import torch
 from ray import tune
 from ray.air.integrations.wandb import WandbLoggerCallback, WANDB_ENV_VAR
 from ray.rllib.core import DEFAULT_MODULE_ID, Columns
@@ -43,6 +44,7 @@ from ray.rllib.utils.typing import ResultDict
 from ray.rllib.utils.error import UnsupportedSpaceException
 from ray.tune import CLIReporter
 from ray.tune.result import TRAINING_ITERATION
+from ray.rllib.core.rl_module.rl_module import RLModule
 
 if TYPE_CHECKING:
     from ray.rllib.algorithms import Algorithm, AlgorithmConfig
@@ -51,6 +53,9 @@ if TYPE_CHECKING:
 from define_args import custom_args
 from onnxruntime.tools import convert_onnx_models_to_ort as c2o
 from pathlib import Path
+
+import logging
+import logging_setup
 
 
 # def _get_strings_related_to_policy(algo_name: str) -> List[str]:
@@ -79,26 +84,60 @@ from pathlib import Path
 #         total_bytes += sum(arr.nbytes for n, arr in weights.items() if pol_str in n)
 #     return total_bytes
 
-def _get_current_onnx_model(algo: ray.rllib.algorithms.Algorithm,
+# OLD VERSION
+# def _get_current_onnx_model(algo: ray.rllib.algorithms.Algorithm,
+#                             *,
+#                             outdir: str = "export_torch"):
+#     """
+#     Function to extract the policy model converted to ort.
+#     """
+#     if os.path.exists(outdir):
+#         shutil.rmtree(outdir)
+#     algo.export_policy_model(outdir, onnx=20)
+#     path = os.path.join(outdir, "model.onnx")
+#     # convert .onnx to .ort (optimized for faster loading and inference in the minion)
+#     styles = [c2o.OptimizationStyle.Fixed]
+#     c2o.convert_onnx_models_to_ort(
+#         model_path_or_dir=Path(path),  # may also be a directory
+#         output_dir=None,  # None = same folder as the .onnx
+#         optimization_styles=styles,
+#         # target_platform="arm",  # Only in the Raspberry Pi
+#     )
+#     with open(os.path.join(outdir, "model.ort"), "rb") as f:
+#         ort_raw = f.read()
+#     return ort_raw
+
+def _get_current_onnx_model(module: RLModule,
+
                             *,
-                            outdir: str = "export_torch"):
+                            outdir: str = "model.onnx",
+                            logger,
+                            ):
     """
     Function to extract the policy model converted to ort.
     """
-    if os.path.exists(outdir):
-        shutil.rmtree(outdir)
-    algo.export_policy_model(outdir, onnx=20)
-    path = os.path.join(outdir, "model.onnx")
+    # if os.path.exists(outdir):
+    #     shutil.rmtree(outdir)
+    assert module.get_ctor_args_and_kwargs()[1]["inference_only"]
+    torch.onnx.export(module,
+                      {"batch":{"obs": torch.randn(1, *module.observation_space.shape)}},
+                      outdir,
+                      export_params=True)
     # convert .onnx to .ort (optimized for faster loading and inference in the minion)
     styles = [c2o.OptimizationStyle.Fixed]
     c2o.convert_onnx_models_to_ort(
-        model_path_or_dir=Path(path),  # may also be a directory
+        model_path_or_dir=Path(outdir),  # may also be a directory
         output_dir=None,  # None = same folder as the .onnx
         optimization_styles=styles,
         # target_platform="arm",  # Only in the Raspberry Pi
     )
-    with open(os.path.join(outdir, "model.ort"), "rb") as f:
+    with open("model.ort", "rb") as f:
         ort_raw = f.read()
+
+    # for debugging
+    logger.debug(f"In _get_current_onnx_model, PID={os.getpid()}")
+    logger.debug(f"Model size is {len(ort_raw)} bytes")
+
     return ort_raw
 
 
@@ -179,6 +218,14 @@ def run_rllib_shared_memory(
     if args.as_release_test:
         args.as_test = True
 
+    logger = logging.getLogger("MyRLApp.custom_runner")
+    logger.info(f"custom_runner, PID={os.getpid()}")
+
+    # pass main driver PID down to EnvRunner
+
+
+    logger.debug("custom_run: Started custom run function")
+
     # Initialize Ray.
     ray.init(
         num_cpus=args.num_cpus or None,
@@ -186,6 +233,8 @@ def run_rllib_shared_memory(
         ignore_reinit_error=True,
         runtime_env={"env_vars": {"RAY_DEBUG": "legacy"}},
     )
+
+    logger.debug("custom_run: Concluded ray.init()")
 
     # Define one or more stopping criteria.
     if stop is None:
@@ -220,6 +269,8 @@ def run_rllib_shared_memory(
             config.env_runners(num_env_runners=args.num_env_runners)
         if args.num_envs_per_env_runner is not None:
             config.env_runners(num_envs_per_env_runner=args.num_envs_per_env_runner)
+        if args.create_local_env_runner is not None:
+            config.env_runners(create_local_env_runner=args.create_local_env_runner)
 
         # Define compute resources used automatically (only using the --num-learners
         # and --num-gpus-per-learner args).
@@ -308,6 +359,8 @@ def run_rllib_shared_memory(
         if args.output is not None:
             config.offline_data(output=args.output)
 
+    logger.debug("custom_run: Done with setting config. Going into args.no_tune")
+
     # Run the experiment w/o Tune (directly operate on the RLlib Algorithm object).
     # THIS IS WHAT WILL BE RUN ON THE RASPBERRY PI
     if args.no_tune:
@@ -317,69 +370,146 @@ def run_rllib_shared_memory(
         f_shm = shared_memory.SharedMemory(
             create=True,
             name=args.flag_shm_name,
-            size=2  # first byte for access control (lock flag), second byte for whether new weights are available
+            size=3  # first byte for access control (lock flag), second byte for whether new weights are available,
+                    # third byte is the flag for minion collecting rollouts
         )
         f_buf = f_shm.buf
-        f_buf[0] = 1    # set lock flag to locked
+
+        # flag buffer has 4 flags:
+        #   0 -> weights lock flag (locked_state=1)
+        #   1 -> weights available flag (true_state=1)
+        #   2 -> minion data collection flag (has it started collecting data, true_state=1)
+        #   3 -> episode buffer lock flag (needed because of race conditions with reading and writing, locked_state=1)
+
+        f_buf[0] = 1    # set weights lock flag to locked
         f_buf[1] = 0    # set weights-available flag to false
+        f_buf[2] = 0    # set minion flag to false (minion has not started collecting rollouts)
+        f_buf[3] = 0    # set episode lock flag to unlocked
+
+        logger.debug("custom_run: created flag memory buffer")
 
         # build algorithm, EnvRunner is created in this call
         algo = config.build()
 
+        logger.debug("custom_run: done with config.build()")
+
         # extract dimensions of weights in the networks
-        ort_raw = _get_current_onnx_model(algo)
-        ort_compressed = gzip.compress(ort_raw)
-        policy_nbytes = len(ort_compressed)
+        ort_raw = _get_current_onnx_model(algo.get_module(), logger=logger)
+        policy_nbytes = len(ort_raw)
+
+        logger.debug(f"custom_run: ort_raw length is {policy_nbytes}")
 
         # create policy shared memory blocks
+        # need to include one more float32 as the buffer header to contain length of ort_compressed.
+        # python creates the length of the buffer to be the smallest number of pages that can hold the requested number
+        # of bytes, but not the size requested (on Mac at least)
+        header_offset = 4
         p_shm = shared_memory.SharedMemory(
             create=True,
             name=args.policy_shm_name,
-            size=policy_nbytes
+            size=policy_nbytes+header_offset
         )
+
+        logger.debug("custom_run: created policy memory buffer")
 
         # get reference to policy buffer
         p_buf = p_shm.buf
 
+        logger.debug(f"custom_run: buffer length is {len(p_buf)}")
+
         # store initial weights and remove lock flags
-        p_buf[:len(ort_compressed)] = ort_compressed  # insert compressed weights
+        struct.pack_into("<I", p_buf, 0, policy_nbytes)
+        p_buf[header_offset:header_offset+len(ort_raw)] = ort_raw  # insert raw weights
         f_buf[0] = 0  # set lock flag to unlocked
         f_buf[1] = 1  # set weights-available flag to 1 (true)
 
+        logger.debug("custom_run: stored initial model weights")
+
         results = None
+
+        logger.debug("custom_run: waiting until minion starts collecting rollouts.")
+        # wait until the minion has started collecting rollouts
+        while f_buf[2] == 0:
+            time.sleep(0.1)
+        logger.debug("custom_run: minion is now collecting rollouts")
+
+        # debugging
+        # logger.debug(f"custom_run: circular_buffer_num_batches -> {algo.config.circular_buffer_num_batches}")
+        # logger.debug(
+        #     f"custom_run: circular_buffer_iterations_per_batch -> {algo.config.circular_buffer_iterations_per_batch}")
+        # logger.debug(f"custom_run: target_network_update_freq -> {algo.config.target_network_update_freq}")
+        logger.debug(
+            f"custom_run: num_aggregator_actors_per_learner -> {algo.config.num_aggregator_actors_per_learner}")
+        logger.debug(
+            f"custom_run: num_envs_per_env_runner -> {algo.config.num_envs_per_env_runner}")
+        logger.debug(f"custom_run: _skip_learners -> {algo.config._skip_learners}")
+        logger.debug(f"custom_run: enable_rl_module_and_learner? {algo.config.enable_rl_module_and_learner}")
+        logger.debug(f"custom_run: broadcast_env_runner_states? {algo.config.broadcast_env_runner_states}")
+        logger.debug(f"custom_run: num_learners -> {algo.config.num_learners}")
+        logger.debug(f"custom_run: min_sample_timesteps_per_iteration -> {algo.config.min_sample_timesteps_per_iteration}")
+        # logger.debug(f"custom_run: min_env_steps_per_iteration -> {algo.config.min_env_steps_per_iteration}")
+        # logger.debug(f"custom_run: min_time_s_per_iteration -> {algo.config.min_time_s_per_iteration}")
+
+        merge = (
+            not algo.config.enable_env_runner_and_connector_v2
+            and algo.config.use_worker_filter_stats
+        ) or (
+            algo.config.enable_env_runner_and_connector_v2
+            and (
+                algo.config.merge_env_runner_states is True
+                or (
+                    algo.config.merge_env_runner_states == "training_only"
+                    and not algo.config.in_evaluation
+                )
+            )
+        )
+        broadcast = (
+            not algo.config.enable_env_runner_and_connector_v2
+            and algo.config.update_worker_filter_stats
+        ) or (
+            algo.config.enable_env_runner_and_connector_v2
+            and algo.config.broadcast_env_runner_states
+        )
+        logger.debug(f"custom_run: merge -> {merge}")
+        logger.debug(f"custom_run: broadcast -> {broadcast}")
 
         try:
             # start counter
             train_iter = 0
             while True:
+                logger.debug("custom_run: in the train loop now.")
+
                 # perform one logical iteration of training
                 results = algo.train()
 
-                # get new model weights
-                ort_raw = _get_current_onnx_model(algo)
-                ort_compressed = gzip.compress(ort_raw)
-
-                # sanity check to make sure the size of the weights vector is the same
-                assert policy_nbytes == len(ort_compressed), (
-                    f"Expected SHM size {len(p_buf)} but got {len(ort_compressed)}."
+                # attempt at debugging
+                # logger.debug("custom_run: ran algo.train()")
+                # target_updates = algo._counters["num_target_updates"]
+                # last_update = algo._counters["last_target_update_ts"]
+                # cur_ts = algo._counters[
+                #     (
+                #         "num_agent_steps_sampled"
+                #         if algo.config.count_steps_by == "agent_steps"
+                #         else "num_env_steps_sampled"
+                #     )
+                # ]
+                # logger.debug(f"custom_run: enable_rl_module_and_learner? {algo.config.enable_rl_module_and_learner}")
+                # logger.debug(f"custom_run: tentative update frequency: {algo.config.num_epochs * algo.config.minibatch_buffer_size}")
+                # logger.debug(f"custom_run: update math: {cur_ts - last_update}")
+                # logger.debug(f"custom_run: number of target updates: {target_updates}")
+                last_synch = algo.metrics.peek(
+                    "num_training_step_calls_since_last_synch_worker_weights",
                 )
-
-                # if lock is set to true wait until it isn't and then update the weights
-                while f_buf[0] == 1:
-                    time.sleep(0.0001)
-
-                # save new model weights to buffer
-                f_buf[0] = 1        # set lock flag to locked
-                p_buf[:len(ort_compressed)] = ort_compressed  # insert compressed weights
-                f_buf[0] = 0        # set lock flag to unlocked
-                f_buf[1] = 1        # set weights-available flag to 1 (true)
+                logger.debug(f"custom_run: num training steps since last synch: {last_synch}")
+                logger.debug(f"custom_run: num_weights_broadcast -> {algo.metrics.peek('num_weight_broadcasts')}")
 
                 # print results
                 if ENV_RUNNER_RESULTS in results:
                     mean_return = results[ENV_RUNNER_RESULTS].get(
                         EPISODE_RETURN_MEAN, np.nan
                     )
-                    print(f"iter={train_iter} R={mean_return}", end="")
+                    logger.debug(f"iter={train_iter} R={mean_return}")
+                    # print(f"iter={train_iter} R={mean_return}", end="")
                 if EVALUATION_RESULTS in results:
                     Reval = results[EVALUATION_RESULTS][ENV_RUNNER_RESULTS][
                         EPISODE_RETURN_MEAN
@@ -392,6 +522,7 @@ def run_rllib_shared_memory(
 
         except KeyboardInterrupt:
             if not keep_ray_up:
+                # del f_arr
                 ray.shutdown()
 
         return results

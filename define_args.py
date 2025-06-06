@@ -50,6 +50,19 @@ def custom_args(
         help="The number of (remote) EnvRunners to use for the experiment.",
     )
     parser.add_argument(
+        "--create-local-env-runner",
+        type=bool,
+        default=False,
+        help="If True, create a local EnvRunner instance, besides the num_env_runners remote EnvRunner actors.",
+    )
+    parser.add_argument(
+        "--create-env-on-local-worker",
+        type=bool,
+        default=False,
+        help="If True and create_local_env_runner is also True, will have the local EnvRunner also sample rollouts"
+             "from environment.",
+    )
+    parser.add_argument(
         "--num-envs-per-env-runner",
         type=int,
         default=None,

@@ -2,6 +2,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from gym_utils.reward_typing import RewardFn
 import numpy as np
+from typing import Union
 
 from gym_utils.Predictor import Predictor
 
@@ -47,9 +48,14 @@ class EngineEnv(gym.Env):
             self.inj_p_space = np.arange(450, 950, 100)
             self.soi_space = np.arange(-5.6, 2.7, 0.1)
             self.inj_d_space = np.arange(0.31, 0.64, 0.01)
-            self.action_space = spaces.MultiDiscrete([len(self.inj_p_space),
-                                                      len(self.soi_space),
-                                                      len(self.inj_d_space)])
+            self.action_space = spaces.Tuple((
+                # spaces.Discrete(len(self.inj_p_space)),
+                spaces.Discrete(len(self.soi_space)),
+                spaces.Discrete(len(self.inj_d_space))
+            ))
+            # self.action_space = spaces.MultiDiscrete([len(self.inj_p_space),
+            #                                           len(self.soi_space),
+            #                                           len(self.inj_d_space)])
 
         self.reward = reward
 
@@ -92,7 +98,7 @@ class EngineEnv(gym.Env):
         return observation, info
 
     def step(self,
-             action_ind: np.ndarray):
+             action_ind: Union[list, np.ndarray] = None,):
 
         # get actions from indices to values
         inj_p = self.inj_p_space[action_ind[0]]
@@ -100,7 +106,7 @@ class EngineEnv(gym.Env):
         inj_d = self.inj_d_space[action_ind[2]]
         action_arr = np.array([inj_p, soi, inj_d])
 
-        print(f"Action is: {action_arr}")
+        # print(f"Action is: {action_arr}")
 
         # send action values to torch model and get new state
         pressure, self._current_imep, self._current_mprr, cad = (
