@@ -15,6 +15,7 @@ from gymCustom import reward_fn, EngineEnv
 
 import logging
 import logging_setup
+from pprint import pformat
 
 import zmq
 
@@ -52,18 +53,19 @@ def flatten_obs_onehot(obs, imep_space, mprr_space) -> torch.Tensor:
     because it is faster and have more control. Also, the built-in tools weren't
     working.
     """
-    imep, mprr = obs["state"]
+    # imep, mprr = obs["state"]
     tgt = obs["target"]
 
-    imep_idx = np.argmin(np.abs(imep - imep_space))
-    mprr_idx = np.argmin(np.abs(mprr - mprr_space))
-    tgt_idx = np.argmin(np.abs(tgt - mprr_space))
+    # imep_idx = np.argmin(np.abs(imep - imep_space))
+    # mprr_idx = np.argmin(np.abs(mprr - mprr_space))
+    tgt_imep_idx = np.argmin(np.abs(tgt - imep_space))
 
-    imep_cur = np.eye(len(imep_space), dtype=np.float32)[imep_idx]  # (n_imep,)
-    mprr_cur = np.eye(len(mprr_space), dtype=np.float32)[mprr_idx]  # (n_mprr,)
-    imep_tgt = np.eye(len(imep_space), dtype=np.float32)[tgt_idx]  # (n_imep,)
+    # imep_cur = np.eye(len(imep_space), dtype=np.float32)[imep_idx]  # (n_imep,)
+    # mprr_cur = np.eye(len(mprr_space), dtype=np.float32)[mprr_idx]  # (n_mprr,)
+    tgt_imep = np.eye(len(imep_space), dtype=np.float32)[tgt_imep_idx]  # (n_imep,)
 
-    return torch.tensor(np.concatenate([imep_cur, mprr_cur, imep_tgt]))
+    # return torch.tensor(np.concatenate([imep_cur, mprr_cur, imep_tgt]))
+    return torch.tensor(tgt_imep, dtype=torch.float32)
 
 
 def _flatten_obs_array(obs) -> np.ndarray:
@@ -71,7 +73,8 @@ def _flatten_obs_array(obs) -> np.ndarray:
     Function that flattens the observation so that it can be stored in the
     shared memory buffer.
     """
-    return np.append(obs["state"], obs["target"]).astype(np.float32)
+    # return np.append(obs["state"], obs["target"]).astype(np.float32)
+    return np.expand_dims(obs["target"], 0).astype(np.float32)
 
 
 class Minion:
@@ -354,11 +357,14 @@ class Minion:
             # one-hot encode observation
             obs_onehot = flatten_obs_onehot(obs, self.env.imep_space, self.env.mprr_space)
 
-            # inference pass through actor network
-            logits = self.ort_session.run(
-                self.output_names,
-                {"onnx::Gemm_0": np.array([obs_onehot], np.float32)},
-            )[0][0]  # first [0] -> selects "output". second [0] -> selects 0th batch
+            try:
+                # inference pass through actor network
+                logits = self.ort_session.run(
+                    self.output_names,
+                    {"onnx::Gemm_0": np.array([obs_onehot], np.float32)},
+                )[0][0]  # first [0] -> selects "output". second [0] -> selects 0th batch
+            except Exception as e:
+                self.logger.error(f"Could not perform action inference due to error {e}")
 
             # get action probabilities (for discrete action space only)
             logits_soi, logits_d = np.split(logits, self.cuts)
@@ -403,6 +409,7 @@ class Minion:
             train_batches: int = 1,
             eval_rollouts: int = 1,
     ):
+
         if not self.last_obs:
             obs, info = self.env.reset()
             self.write_fragment(_flatten_obs_array(obs), is_initial_state=True)
@@ -477,7 +484,7 @@ def main(policy_shm_name: str,
 
     timesteps = 0
     weight_updates = 0
-    store_rollout = True
+    # store_rollout = True
 
     try:
         while True:

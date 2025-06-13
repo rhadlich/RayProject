@@ -68,7 +68,8 @@ if __name__ == "__main__":
     # define action and observation spaces
     imep_space = np.arange(1.6, 4.1, 0.1)
     mprr_space = np.arange(0, 15, 0.5)
-    flat_dim = 2*len(imep_space) + len(mprr_space)
+    # flat_dim = 2*len(imep_space) + len(mprr_space)
+    flat_dim = len(imep_space)
     obs_space = spaces.Box(
             low=0.0, high=1.0, shape=(flat_dim,), dtype=np.float32
         )
@@ -91,7 +92,7 @@ if __name__ == "__main__":
     dims = {
         "action": 2,
         "reward": 1,
-        "state": 3,                             # this will be the next state AFTER taking "action"
+        "state": 1,                             # this will be the next state AFTER taking "action"
         "action_onehot": action_onehot_size,
         "logp": 1                               # has to be scalar
     }  # the length of the vector of each component of the rollout
