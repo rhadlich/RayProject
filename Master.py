@@ -29,6 +29,7 @@ from ray.rllib.algorithms.impala import IMPALAConfig
 import logging
 import logging_setup
 
+
 parser = custom_args(
     default_reward=450.0, default_iters=200, default_timesteps=2000000
 )
@@ -166,7 +167,10 @@ if __name__ == "__main__":
         .training(
             num_epochs=10,
             train_batch_size_per_learner=1,
+            vtrace_clip_rho_threshold=10,
+            vtrace_clip_pg_rho_threshold=5,
         )
+        .rl_module(model_config={"vf_share_layers": False})
         # .rl_module(rl_module_spec=RLModuleSpec(
         #     observation_space=obs_space,
         #     action_space=action_space,
