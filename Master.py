@@ -26,6 +26,8 @@ from custom_run import run_rllib_shared_memory
 from impala_debug import IMPALADebug
 from ray.rllib.algorithms.impala import IMPALAConfig
 
+from utils import ActionAdapter
+
 import logging
 import logging_setup
 
@@ -83,9 +85,14 @@ if __name__ == "__main__":
         spaces.Discrete(len(inj_d_space))
     ))
 
+    adapter = ActionAdapter(action_space)
+
     # get action space size in one-hot representation. will need this to create
     # the episode buffer such that it can hold the probability distribution
-    action_onehot_size = int(sum([sp.n for sp in action_space]))
+    if adapter.mode in ("discrete1", "multidiscrete"):
+        action_onehot_size = int(sum(adapter.nvec))
+    else:
+        action_onehot_size = 0
 
     # Define name and properties of episode ring buffer to pass down to EnvRunner
     # define the size of each rollout tuple
@@ -170,7 +177,7 @@ if __name__ == "__main__":
             vtrace_clip_rho_threshold=10,
             vtrace_clip_pg_rho_threshold=5,
         )
-        .rl_module(model_config={"vf_share_layers": False})
+        .rl_module(model_config={"vf_share_layers": True})
         # .rl_module(rl_module_spec=RLModuleSpec(
         #     observation_space=obs_space,
         #     action_space=action_space,

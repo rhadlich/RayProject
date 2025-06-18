@@ -13,6 +13,8 @@ from ray.rllib.utils.numpy import softmax
 import gymnasium as gym
 from gymCustom import reward_fn, EngineEnv
 
+from utils import ActionAdapter
+
 import logging
 import logging_setup
 from pprint import pformat
@@ -132,10 +134,13 @@ class Minion:
         self.env = EngineEnv(reward=reward_fn)
 
         # extract action and observation spaces dimensions
-        self.sizes = [sp.n for sp in self.env.action_space]
-        self.cuts = np.cumsum(self.sizes)[:-1]
+        # self.sizes = [sp.n for sp in self.env.action_space]
+        # self.cuts = np.cumsum(self.sizes)[:-1]
         self.len_imep = self.env.observation_space["state"].nvec[0]
         self.len_mprr = self.env.observation_space["state"].nvec[1]
+
+        # initialize action adapter
+        self.action_adapter = ActionAdapter(self.env.action_space)
 
         self.logger.debug("Minion: Initialized ENV.")
 
@@ -366,25 +371,29 @@ class Minion:
             except Exception as e:
                 self.logger.error(f"Could not perform action inference due to error {e}")
 
-            # get action probabilities (for discrete action space only)
-            logits_soi, logits_d = np.split(logits, self.cuts)
-            soi_probs = softmax(logits_soi)
-            inj_d_probs = softmax(logits_d)
+            action_for_env, logp = self.action_adapter.sample_from_policy(logits, deterministic=deterministic)
+            idx_soi = action_for_env[0]
+            idx_inj_d = action_for_env[1]
 
-            # select action based on probabilities
-            if deterministic:
-                # deterministic case, such as for evaluation (greedy)
-                idx_soi = np.argmax(soi_probs)
-                idx_inj_d = np.argmax(inj_d_probs)
-                logp = 0.0  # does not apply for deterministic sampling
-            else:
-                # stochastic case for exploration
-                idx_soi = int(np.random.choice(self.sizes[0], p=soi_probs))
-                idx_inj_d = int(np.random.choice(self.sizes[1], p=inj_d_probs))
-                logp = float(
-                    np.log(soi_probs[idx_soi]) +
-                    np.log(inj_d_probs[idx_inj_d])
-                )  # joint log-probability of multi-branch action space
+            # # get action probabilities (for discrete action space only)
+            # logits_soi, logits_d = np.split(logits, self.cuts)
+            # soi_probs = softmax(logits_soi)
+            # inj_d_probs = softmax(logits_d)
+            #
+            # # select action based on probabilities
+            # if deterministic:
+            #     # deterministic case, such as for evaluation (greedy)
+            #     idx_soi = np.argmax(soi_probs)
+            #     idx_inj_d = np.argmax(inj_d_probs)
+            #     logp = 0.0  # does not apply for deterministic sampling
+            # else:
+            #     # stochastic case for exploration
+            #     idx_soi = int(np.random.choice(self.sizes[0], p=soi_probs))
+            #     idx_inj_d = int(np.random.choice(self.sizes[1], p=inj_d_probs))
+            #     logp = float(
+            #         np.log(soi_probs[idx_soi]) +
+            #         np.log(inj_d_probs[idx_inj_d])
+            #     )  # joint log-probability of multi-branch action space
 
             # send action to environment (and in the case of gym.Env collect new observation and reward)
             action = np.array([1, idx_soi, idx_inj_d], dtype=np.int32)  # 1 is for inj_p, to be kept const.
