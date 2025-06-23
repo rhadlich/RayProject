@@ -2,6 +2,12 @@ import numpy as np
 from ray.rllib.utils.numpy import softmax
 from gymnasium import spaces
 
+from ray.rllib.models.torch.torch_distributions import (
+    TorchCategorical,
+    TorchMultiCategorical,
+    TorchDiagGaussian,
+)
+
 
 class ActionAdapter:
     """
@@ -22,17 +28,20 @@ class ActionAdapter:
         if isinstance(action_space, spaces.Discrete):
             self.mode = "discrete1"
             self.nvec = np.array([action_space.n], dtype=np.int32)
+            self.nint = action_space.n
 
         # --- k-dim categorical -----------------------------------------------
         elif isinstance(action_space, spaces.MultiDiscrete):
             self.mode = "multidiscrete"
             self.nvec = np.asarray(action_space.nvec, dtype=np.int32)
+            self.nint = int(action_space.nvec.sum())
 
         elif isinstance(action_space, spaces.Tuple) and all(
             isinstance(sp, spaces.Discrete) for sp in action_space
         ):
             self.mode = "multidiscrete"
             self.nvec = np.array([sp.n for sp in action_space], dtype=np.int32)
+            self.nint = int(self.nvec.sum())
 
         # --- continuous -------------------------------------------------------
         elif isinstance(action_space, spaces.Box):

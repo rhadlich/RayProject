@@ -6,6 +6,9 @@ from typing import Union
 
 from gym_utils.Predictor import Predictor
 
+import logging
+import logging_setup
+
 
 class EngineEnv(gym.Env):
     """
@@ -35,12 +38,13 @@ class EngineEnv(gym.Env):
         else:
             self.imep_space = np.arange(1.6, 4.1, 0.1)
             self.mprr_space = np.arange(0, 15, 0.5)
-            self.observation_space = spaces.Dict(
-                {
-                    "state": spaces.MultiDiscrete([len(self.imep_space), len(self.mprr_space)]),
-                    "target": spaces.Discrete(len(self.imep_space))
-                }
-            )
+            # self.observation_space = spaces.Dict(
+            #     {
+            #         "state": spaces.MultiDiscrete([len(self.imep_space), len(self.mprr_space)]),
+            #         "target": spaces.Discrete(len(self.imep_space))
+            #     }
+            # )
+            self.observation_space = spaces.Discrete(len(self.imep_space))
 
         if action_space is not None:
             self.action_space = action_space
@@ -74,6 +78,8 @@ class EngineEnv(gym.Env):
         path = '/Users/rodrigohadlich/PycharmProjects/RayProject/AmpereBM/model_weights_mac.pth'
         self.predictor.init_model(input_size, num_layers, layer_exp, out_size, dropout, path)
 
+        self.logger = logging.getLogger("MyRLApp.Environment")
+
     def reset(
             self,
             seed: int = None,
@@ -93,7 +99,7 @@ class EngineEnv(gym.Env):
 
         observation = self._get_obs()
 
-        info = None
+        info = {"current imep": self._current_imep, "mprr": self._current_mprr}
 
         return observation, info
 
@@ -106,8 +112,6 @@ class EngineEnv(gym.Env):
         inj_d = self.inj_d_space[action_ind[2]]
         action_arr = np.array([inj_p, soi, inj_d])
 
-        # print(f"Action is: {action_arr}")
-
         # send action values to torch model and get new state
         pressure, self._current_imep, self._current_mprr, cad = (
             self.predictor.model_predict(action_arr, noise_in_percent=1))
@@ -115,8 +119,11 @@ class EngineEnv(gym.Env):
         # get observation in the right format
         observation = self._get_obs()
 
+        # package inputs for reward
+        reward_inputs = {"target": self._desired_imep, "current imep": self._current_imep, "mprr": self._current_mprr}
+
         # calculate reward
-        reward = self.reward(observation)
+        reward = self.reward(reward_inputs)
 
         # clip observation values to make sure it is within the expected space
         self._current_imep = np.clip(self._current_imep, self.imep_space[0], self.imep_space[-1])
@@ -124,24 +131,24 @@ class EngineEnv(gym.Env):
         observation = self._get_obs()
 
         terminated = 0      # will decide in the controller if it is terminated or not
-        info = pressure     # return pressure trace cause why not
+        info = {"current imep": self._current_imep, "mprr": self._current_mprr, "pressure": pressure}
 
         return observation, reward, terminated, False, info
 
+    # def _get_obs(self):
+    #     return {"state": np.array([self._current_imep, self._current_mprr]), "target": self._desired_imep}
     def _get_obs(self):
-        return {"state": np.array([self._current_imep, self._current_mprr]), "target": self._desired_imep}
+        return self._desired_imep
 
 
-def reward_fn(obs):
-    imep, mprr = obs["state"]
-    target = obs["target"]
-
+def reward_fn(inputs):
+    imep = inputs["current imep"]
+    mprr = inputs["mprr"]
+    target = inputs["target"]
     l = (imep - target)**2
     l1 = 3
-    l2 = -8
-    l3 = -0.5
-
+    l2 = -10
+    l3 = -1.0
     load_tracking = np.tanh(l1*l)*l2 + l*l3
-    safety = (max(0, mprr-7)**2) * -0.2
-
+    safety = (max(0, mprr-7)**2) * -0.0
     return load_tracking + safety

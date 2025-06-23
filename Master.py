@@ -5,11 +5,12 @@ How to run this script
 `python master.py --algo "algo_name (like PPO, SAC, etc.)" --no-tune
 
 """
+import numpy as np
+import os
 
 import gymnasium as gym
 from gymnasium import spaces
-import numpy as np
-import os
+from gymCustom import EngineEnv, reward_fn
 
 from shared_memory_env_runner import SharedMemoryEnvRunner
 # from ray.rllib.utils.test_utils import (
@@ -27,6 +28,7 @@ from impala_debug import IMPALADebug
 from ray.rllib.algorithms.impala import IMPALAConfig
 
 from utils import ActionAdapter
+from torch_rl_modules.impala_rl_modules import ImpalaMlpModule
 
 import logging
 import logging_setup
@@ -65,25 +67,35 @@ if __name__ == "__main__":
     logger = logging.getLogger("MyRLApp.Master")
     logger.info(f"MASTER, PID={os.getpid()}")
 
-    # decided to go with one-hot observation representation, manually handling it outside or RLlib.
-    # RLlib was having issues with the internal connectors so this was more transparent (and probably faster).
+    # make environment to have access to observation and action spaces
+    env = EngineEnv(reward=reward_fn)
+    obs_space = env.observation_space
+    action_space = env.action_space
+    imep_space = env.imep_space
+    mprr_space = env.mprr_space
 
-    # define action and observation spaces
-    imep_space = np.arange(1.6, 4.1, 0.1)
-    mprr_space = np.arange(0, 15, 0.5)
-    # flat_dim = 2*len(imep_space) + len(mprr_space)
+    # patch up the dimensions issue when running a discrete observation space
     flat_dim = len(imep_space)
-    obs_space = spaces.Box(
+    obs_space_onehot = spaces.Box(
             low=0.0, high=1.0, shape=(flat_dim,), dtype=np.float32
         )
-    inj_p_space = np.arange(450, 950, 100)
-    soi_space = np.arange(-5.6, 2.7, 0.1)
-    inj_d_space = np.arange(0.31, 0.64, 0.01)
-    action_space = spaces.Tuple((
-        # spaces.Discrete(len(inj_p_space)),    # will be kept constant
-        spaces.Discrete(len(soi_space)),
-        spaces.Discrete(len(inj_d_space))
-    ))
+
+    # # define action and observation spaces
+    # imep_space = np.arange(1.6, 4.1, 0.1)
+    # mprr_space = np.arange(0, 15, 0.5)
+    # # flat_dim = 2*len(imep_space) + len(mprr_space)
+    # flat_dim = len(imep_space)
+    # obs_space = spaces.Box(
+    #         low=0.0, high=1.0, shape=(flat_dim,), dtype=np.float32
+    #     )
+    # inj_p_space = np.arange(450, 950, 100)
+    # soi_space = np.arange(-5.6, 2.7, 0.1)
+    # inj_d_space = np.arange(0.31, 0.64, 0.01)
+    # action_space = spaces.Tuple((
+    #     # spaces.Discrete(len(inj_p_space)),    # will be kept constant
+    #     spaces.Discrete(len(soi_space)),
+    #     spaces.Discrete(len(inj_d_space))
+    # ))
 
     adapter = ActionAdapter(action_space)
 
@@ -142,6 +154,13 @@ if __name__ == "__main__":
         "action_onehot_size": action_onehot_size,
     }
 
+    # wrap custom RLModule in the module spec
+    spec = RLModuleSpec(
+        module_class=ImpalaMlpModule,
+        observation_space=obs_space_onehot,
+        action_space=action_space,
+    )
+
     # Define the RLlib (Master) config.
     base_config = (
         get_trainable_cls(args.algo)
@@ -152,7 +171,7 @@ if __name__ == "__main__":
             enable_env_runner_and_connector_v2=True,  # turn connector-v2 on
         )
         .environment(
-            observation_space=obs_space,
+            observation_space=obs_space_onehot,
             action_space=action_space,
             clip_rewards=False,
             env_config={"policy_shm_name": args.policy_shm_name,
@@ -177,7 +196,8 @@ if __name__ == "__main__":
             vtrace_clip_rho_threshold=10,
             vtrace_clip_pg_rho_threshold=5,
         )
-        .rl_module(model_config={"vf_share_layers": True})
+        .rl_module(rl_module_spec=spec)
+        # .rl_module(model_config={"vf_share_layers": False})
         # .rl_module(rl_module_spec=RLModuleSpec(
         #     observation_space=obs_space,
         #     action_space=action_space,

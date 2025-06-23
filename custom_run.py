@@ -91,10 +91,6 @@ def _get_current_onnx_model(module: RLModule,
     with open("model.ort", "rb") as f:
         ort_raw = f.read()
 
-    # for debugging
-    logger.debug(f"In _get_current_onnx_model, PID={os.getpid()}")
-    logger.debug(f"Model size is {len(ort_raw)} bytes")
-
     return ort_raw
 
 
@@ -487,7 +483,6 @@ def run_rllib_shared_memory(
 
                 # send results to be logged in the GUI
                 pub.send_json(msg)
-                logger.debug(f"custom_run: sent message to GUI: {msg}")
 
                 # increment counter
                 train_iter += 1

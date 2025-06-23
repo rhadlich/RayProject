@@ -56,7 +56,7 @@ def flatten_obs_onehot(obs, imep_space, mprr_space) -> torch.Tensor:
     working.
     """
     # imep, mprr = obs["state"]
-    tgt = obs["target"]
+    tgt = obs
 
     # imep_idx = np.argmin(np.abs(imep - imep_space))
     # mprr_idx = np.argmin(np.abs(mprr - mprr_space))
@@ -76,7 +76,7 @@ def _flatten_obs_array(obs) -> np.ndarray:
     shared memory buffer.
     """
     # return np.append(obs["state"], obs["target"]).astype(np.float32)
-    return np.expand_dims(obs["target"], 0).astype(np.float32)
+    return np.expand_dims(obs, 0).astype(np.float32)
 
 
 class Minion:
@@ -124,7 +124,7 @@ class Minion:
         # get initial network weights
         while self.f_buf[1] == 0:  # wait until weights-available flag is set to true
             time.sleep(0.01)
-        self.ort_session, self.output_names = self._get_ort_session()
+        self.ort_session, self.input_names, self.output_names = self._get_ort_session()
         self.f_buf[1] = 0  # change new-weights-available flag to false
 
         self.logger.debug("Minion: Initialized ORT session")
@@ -136,8 +136,8 @@ class Minion:
         # extract action and observation spaces dimensions
         # self.sizes = [sp.n for sp in self.env.action_space]
         # self.cuts = np.cumsum(self.sizes)[:-1]
-        self.len_imep = self.env.observation_space["state"].nvec[0]
-        self.len_mprr = self.env.observation_space["state"].nvec[1]
+        self.len_imep = len(self.env.imep_space)
+        self.len_mprr = len(self.env.mprr_space)
 
         # initialize action adapter
         self.action_adapter = ActionAdapter(self.env.action_space)
@@ -172,14 +172,16 @@ class Minion:
         )
         output_names = [o.name for o in ort_session.get_outputs()]
 
-        return ort_session, output_names
+        input_names = [i.name for i in ort_session.get_inputs()]
+
+        return ort_session, input_names, output_names
 
     def try_update_ort_weights(self) -> bool:
         # update policy network weights if available and not being written to
         if self.f_buf[1] == 1 and self.f_buf[0] == 0:
             self.logger.debug("Minion: Updating ort session weights...")
             self.f_buf[0] = 1  # set lock flag to locked
-            self.ort_session, self.output_names = self._get_ort_session()  # get ort session with new weights
+            self.ort_session, self.input_names, self.output_names = self._get_ort_session()  # get ort session with new weights
             self.f_buf[0] = 0  # set lock flag to unlocked
             self.f_buf[1] = 0  # reset weights-available flag to 0 (false, i.e. no new weights)
             self.logger.debug("Minion: Ort weights updated.")
@@ -355,7 +357,8 @@ class Minion:
                 "terminateds": [],
                 "truncateds": [],
                 "action_dist_inputs": [],
-                "action_logps": []
+                "action_logps": [],
+                "info": []
             }  # dict to store the rollouts
 
         for i in range(n_rollouts):
@@ -366,7 +369,7 @@ class Minion:
                 # inference pass through actor network
                 logits = self.ort_session.run(
                     self.output_names,
-                    {"onnx::Gemm_0": np.array([obs_onehot], np.float32)},
+                    {self.input_names[0]: np.array([obs_onehot], np.float32)},
                 )[0][0]  # first [0] -> selects "output". second [0] -> selects 0th batch
             except Exception as e:
                 self.logger.error(f"Could not perform action inference due to error {e}")
@@ -400,7 +403,7 @@ class Minion:
             obs, reward, terminated, truncated, info = self.env.step(action)
 
             if n_rollouts == 1:
-                return [obs, action, reward, terminated, truncated, logp, logits]
+                return [obs, action, reward, terminated, truncated, logp, logits, info]
             else:
                 rollouts["obs"].append(obs)
                 # rollouts["obs_onehot"].append(obs_onehot)
@@ -410,6 +413,7 @@ class Minion:
                 rollouts["truncateds"].append(truncated)
                 rollouts["action_logps"].append(logp)
                 rollouts["action_dist_inputs"].append(logits)
+                rollouts["info"].append(info)
 
         return rollouts
 
@@ -426,8 +430,15 @@ class Minion:
             obs = self.last_obs
 
         for i in range(int(train_batches*self.episode_shm_properties["BATCH_SIZE"])):
-            obs, action, reward, terminated, truncated, logp, logits = (
+            obs, action, reward, terminated, truncated, logp, logits, info = (
                 self.collect_rollouts(initial_obs=obs))
+
+            # self.logger.debug(f"Minion (train_and_eval_sequence): received new rollout.")
+            # self.logger.debug(f"Minion (train_and_eval_sequence): obs: {obs}.")
+            # self.logger.debug(f"Minion (train_and_eval_sequence): action: {action}.")
+            # self.logger.debug(f"Minion (train_and_eval_sequence): reward: {reward}.")
+            # self.logger.debug(f"Minion (train_and_eval_sequence): logp: {logp}.")
+            # self.logger.debug(f"Minion (train_and_eval_sequence): info: {info}.")
 
             action = action[1:]
             obs_flat = _flatten_obs_array(obs)  # flatten to shape needed by memory buffer
@@ -439,22 +450,40 @@ class Minion:
                 logits.astype(np.float32),
             )).astype(np.float32)
 
+            # self.logger.debug(f"Minion (train_and_eval_sequence): built packet.")
+
             # write it into the buffer
             self.write_fragment(current_packet)
 
+            # self.logger.debug(f"Minion (train_and_eval_sequence): wrote to buffer.")
+
             # send training results to be logged in the GUI
-            msg = {"topic": "engine", "state": obs["state"].tolist(), "target": float(obs["target"])}
+            msg = {
+                "topic": "engine",
+                "current imep": info["current imep"],
+                "mprr": info["mprr"],
+                "target": float(obs)
+            }
+            # self.logger.debug(f"Minion (train_and_eval_sequence): msg: {msg}.")
             self.pub.send_json(msg)
+
+            # self.logger.debug(f"Minion (train_and_eval_sequence): sent to GUI.")
 
         # set last observation
         self.last_obs = obs
 
         for i in range(eval_rollouts):
-            obs, action, _, _, _, _, _ = (
+            obs, action, _, _, _, _, _, info = (
                 self.collect_rollouts(initial_obs=obs, deterministic=True))
 
             # send evaluation results to be logged in the GUI
-            msg = {"topic": "evaluation", "state": obs["state"].tolist(), "target": float(obs["target"])}
+            msg = {
+                "topic": "evaluation",
+                "current imep": info["current imep"],
+                "mprr": info["mprr"],
+                "target": float(obs)
+            }
+            # self.logger.debug(f"Minion (train_and_eval_sequence): msg: {msg}.")
             self.pub.send_json(msg)
 
 

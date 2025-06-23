@@ -40,18 +40,19 @@ from ray.rllib.policy.policy_map import PolicyMap
 from ray.rllib.policy.policy import Policy
 
 from multiprocessing import shared_memory
-import Minion
+import minion
 from custom_run import _get_current_onnx_model
 import struct
 import ray
-from Minion import (
+from minion import (
     get_indices,
     set_indices,
-    _flatten_obs_onehot
+    flatten_obs_onehot
 )
 
 import logging
 import logging_setup
+from pprint import pformat
 
 
 @ray.remote(num_cpus=1)
@@ -66,15 +67,16 @@ def _run_minion(policy_shm_name: str,
     """
     logger.debug("IN _RUN_MINION NOW.")
     logger.debug(f"_run_minion called by PID: {os.getpid()}")
-    Minion.main(policy_shm_name, flag_shm_name, ep_shm_name, episode_shm_properties)
+    minion.main(policy_shm_name, flag_shm_name, ep_shm_name, episode_shm_properties)
 
 
 def _decode_obs(obs):
     """
     Function that takes in flattened observation (np.array) and converts it to
-    the dictionary format of the environment's observation space.
+    the format of the environment's observation space.
     """
-    return {"state": obs[:-1], "target": obs[-1]}
+    # return {"state": obs[:-1], "target": obs[-1]}
+    return obs
 
 
 class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
@@ -141,6 +143,9 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
 
         self._weights_seq_no = 0
         self.weight_update_no = 0
+
+        self.logger.debug("EnvRunner: obs and act spaces:")
+        self.logger.debug(f"{(self.config.observation_space, self.config.action_space)}")
 
         # Build the module from its spec.
         module_spec = self.config.get_rl_module_spec(
@@ -379,12 +384,14 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
         return state
 
     def set_state(self, state: StateDict) -> None:
-        # self.logger.debug("EnvRunner: Called set_state()")
+        self.logger.debug("EnvRunner: Called set_state()")
         # Update the RLModule state.
         if COMPONENT_RL_MODULE in state:
             # A missing value for WEIGHTS_SEQ_NO or a value of 0 means: Force the
             # update.
             weights_seq_no = state.get(WEIGHTS_SEQ_NO, 0)
+
+            self.logger.debug(f"EnvRunner: weights_seq_no={weights_seq_no}")
 
             # Only update the weights, if this is the first synchronization or
             # if the weights of this `EnvRunner` lacks behind the actual ones.
@@ -407,19 +414,13 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
                 if self.worker_index > 0:
                     # make sure shared memory blocks have been linked
                     if self.policy_shm == False:
-                        self.logger.debug("EnvRunner: Calling _get_shm_references() in set_state()")
                         self._get_shm_references()
 
-                    self.logger.debug("EnvRunner: getting onnx model weights")
                     # get new model weights
                     ort_raw = _get_current_onnx_model(self.module, logger=self.logger)
 
-                    self.logger.debug("EnvRunner: got onnx model weights, updating policy shm")
-
                     # update the policy weights in the policy shared memory buffer
                     self._update_policy_shm(ort_raw)
-
-                    self.logger.debug("EnvRunner: policy shm updated")
 
                     # set weights-available flag to 1 (true) so that minion can update
                     self.f_buf[1] = 1
@@ -639,7 +640,7 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
             )
 
             # add initial state
-            batch.add_env_reset(_flatten_obs_onehot(_decode_obs(initial_state), self.imep_space, self.mprr_space))
+            batch.add_env_reset(flatten_obs_onehot(_decode_obs(initial_state), self.imep_space, self.mprr_space))
 
             # get start and end indices of each component of the payload
             action_start = 0
@@ -659,7 +660,7 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
                     action=rollout[action_start:action_end],
                     reward=np.squeeze(rollout[reward_start:reward_end]),
                     # observation !AFTER! taking "action"
-                    observation=_flatten_obs_onehot(_decode_obs(rollout[obs_start:obs_end]),
+                    observation=flatten_obs_onehot(_decode_obs(rollout[obs_start:obs_end]),
                                                     self.imep_space, self.mprr_space),
                     terminated=bool(terminateds[j]),
                     truncated=bool(truncateds[j]),

@@ -253,7 +253,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.evaluation_x.append(self.evaluation_count)
 
         data_list = self.engine_data['evaluation error']
-        data_list.append(np.abs(msg["state"][0] - msg["target"]))
+        data_list.append(np.abs(msg["current imep"] - msg["target"]))
 
     def _update_engine(self, msg):
         # self.log.debug(f"GUI: In _update_engine.")
@@ -262,8 +262,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # self.log.debug(f"GUI (_update_engine): msg -> {msg}.")
 
         data = {
-            "imep": msg["state"][0],
-            "mprr": msg["state"][1],
+            "imep": msg["current imep"],
+            "mprr": msg["mprr"],
             "target imep": msg["target"],
             "mean sampled imep": mean(self.engine_data['target imep']) if list(
                 self.engine_data['target imep']) != [] else 0,
