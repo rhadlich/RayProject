@@ -8,7 +8,6 @@ How to run this script
 import numpy as np
 import os
 
-import gymnasium as gym
 from gymnasium import spaces
 from gymCustom import EngineEnvDiscrete, EngineEnvContinuous, reward_fn
 
@@ -19,22 +18,14 @@ from shared_memory_env_runner import SharedMemoryEnvRunner
 # )
 from ray.tune.registry import get_trainable_cls
 from ray.rllib.core.rl_module import RLModuleSpec
-from ray.rllib.connectors.env_to_module import FlattenObservations
 
-from multiprocessing import shared_memory
 from define_args import get_full_parser
 from custom_run import run_rllib_shared_memory
-from impala_debug import IMPALADebug
-from ray.rllib.algorithms.impala import IMPALAConfig
 
 from utils import ActionAdapter
 from torch_rl_modules.impala_rl_modules import ImpalaMlpModule
 
 import logging
-import logging_setup
-
-from custom_learner import BehaviourAuditLearner
-
 
 parser = get_full_parser()
 parser.set_defaults(
