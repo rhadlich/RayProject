@@ -146,13 +146,6 @@ if __name__ == "__main__":
         "action_dist_size": action_dist_size,
     }
 
-    # wrap custom RLModule in the module spec
-    spec = RLModuleSpec(
-        module_class=ImpalaMlpModule,
-        observation_space=obs_space_onehot or obs_space,
-        action_space=action_space,
-    )
-
     # Define the RLlib (Master) config.
     base_config = (
         get_trainable_cls(args.algo)
@@ -184,43 +177,10 @@ if __name__ == "__main__":
             num_cpus_per_env_runner=args.num_cpus_per_env_runner,
             create_local_env_runner=args.create_local_env_runner,
             create_env_on_local_worker=args.create_env_on_local_worker,
-            # env_to_module_connector=_env_to_module_pipeline,    # needed because observation space is a nested structure
         )
-        # .training(
-        #     num_epochs=10,
-        #     train_batch_size_per_learner=1,
-        #     model={"free_log_std": True},
-        #     # q_model_config={
-        #     #     "fcnet_hiddens": [64, 64],
-        #     #     "fcnet_activation": "relu",
-        #     #     "post_fcnet_hiddens": [],
-        #     #     "post_fcnet_activation": None,
-        #     #     "custom_model": None,  # Use this to define custom Q-model(s).
-        #     #     "custom_model_config": {},
-        #     # },
-        #     # policy_model_config={
-        #     #     "fcnet_hiddens": [128, 128],
-        #     #     "fcnet_activation": "relu",
-        #     #     "post_fcnet_hiddens": [],
-        #     #     "post_fcnet_activation": None,
-        #     #     "custom_model": None,  # Use this to define a custom policy model.
-        #     #     "custom_model_config": {},
-        #     # },
-        #     # initial_alpha=0.1,
-        #     # alpha_lr=3e-5,
-        #     # actor_lr=3e-5,
-        #     # critic_lr=3e-5,
-        #     # tau=0.001,
-        #     # learner_class=BehaviourAuditLearner,
-        #     # vtrace_clip_rho_threshold=10,
-        #     # vtrace_clip_pg_rho_threshold=5,
-        # )
-        # .rl_module(rl_module_spec=spec)
-        # .rl_module(model_config={"vf_share_layers": False})
     )
 
     import importlib
-
     try:
         mod = importlib.import_module(f"algo_configs.{args.algo.lower()}_cfg")
         if hasattr(mod, "update_config"):
