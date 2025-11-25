@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-
-from AmpereBM.define_models import MLP
+from define_models import MLP
 
 
 class Predictor:
