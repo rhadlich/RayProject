@@ -58,8 +58,6 @@ from pathlib import Path
 import logging
 import logging_setup
 
-from custom_callbacks import walk_keys
-
 # Try to import zmq, but make it optional
 try:
     import zmq
