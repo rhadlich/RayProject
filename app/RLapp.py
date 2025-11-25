@@ -74,23 +74,23 @@ class MainWindow(QtWidgets.QMainWindow):
         #========= DEFINE WHICH ALGO TO RUN HERE ==========================================
         algo = 'IMPALA'
 
-        # 1) Launch Master.py (which you’ve set up to spawn
-        #    custom_run.py, shared_memory_env_runner.py, minion.py)
+        # launch Master.py (which is set up to spawn custom_run.py, shared_memory_env_runner.py, minion.py)
         script_dir = os.path.dirname('/Users/rodrigohadlich/PycharmProjects/RayProject/')
         master_path = os.path.join(script_dir, "Master.py")
         cmd = [
             sys.executable,
             master_path,
             "--algo", algo,
+            "--enable-zmq", "True",
         ]
         # use the same Python interpreter
         self.master_proc = subprocess.Popen(cmd)
 
-        # Create containers for plot parameters
+        # create containers for plot parameters
         self.plot_colors = ["#e60049", "#0bb4ff", "#50e991", "#ffa300", "#9b19f5", "#dc0ab4", "#b3d4ff", "#00bfa0"]
         self.plot_line_width = 5
 
-        # Data structures for plotting
+        # data structures for plotting
         self._max_points = 3000
         # engine: dynamic curves keyed by metric name
         self.engine_curves = {}
@@ -121,14 +121,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.training_x = []
         self.training_y = []
 
-        # 2) Set up the UI
+        # set up the UI
         central = QtWidgets.QWidget()
         vlay = QtWidgets.QVBoxLayout(central)
         self.setCentralWidget(central)
 
         alpha = 225
 
-        # 2a) Engine metrics (load tracking) plot
+        # engine metrics (load tracking) plot
         self.load_plot = pg.PlotWidget(title="Load Tracking (minion.py)")
         legend_load = self.load_plot.addLegend()
         legend_load.setBrush(mkBrush(255, 255, 255, alpha))  # RGBA, 200 alpha
@@ -147,7 +147,7 @@ class MainWindow(QtWidgets.QMainWindow):
         curve = self.load_plot.plot(name='mean sampled imep', pen=pen)
         self.engine_curves['mean sampled imep'] = curve
 
-        # 2b) Engine metrics (safety) plot
+        # engine metrics (safety) plot
         self.safety_plot = pg.PlotWidget(title="Safety (minion.py)")
         legend_safety = self.safety_plot.addLegend()
         legend_safety.setBrush(mkBrush(255, 255, 255, alpha))  # RGBA, 200 alpha
@@ -159,7 +159,7 @@ class MainWindow(QtWidgets.QMainWindow):
         curve = self.safety_plot.plot(name='mprr', pen=pen)
         self.engine_curves['mprr'] = curve
 
-        # 2c) Engine metrics (safety) plot
+        # engine metrics (safety) plot
         self.evaluation_plot = pg.PlotWidget(title="Evaluation (minion.py)")
         legend_evaluation = self.evaluation_plot.addLegend()
         legend_evaluation.setBrush(mkBrush(255, 255, 255, alpha))  # RGBA, 200 alpha
@@ -171,7 +171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         curve = self.evaluation_plot.plot(name='evaluation error', pen=pen)
         self.engine_curves['evaluation error'] = curve
 
-        # 2d) Training reward plot
+        # training reward plot
         self.training_plot = pg.PlotWidget(title="Training Reward (custom_run.py)")
         legend_training = self.training_plot.addLegend()
         legend_training.setBrush(mkBrush(255, 255, 255, alpha))  # RGBA, 200 alpha
@@ -179,7 +179,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.training_plot.setBackground('w')
         vlay.addWidget(self.training_plot)
 
-        # 2e) Policy update plots
+        # policy update plots
         date_axis = DateAxisItem(orientation='bottom')
         self.t0 = time.time()
         self.policy_plot = pg.PlotWidget(

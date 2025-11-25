@@ -22,7 +22,13 @@ import logging
 import logging_setup
 from pprint import pformat
 
-import zmq
+# Try to import zmq, but make it optional
+try:
+    import zmq
+    zmq_available = True
+except ImportError:
+    zmq_available = False
+    zmq = None
 
 
 def get_indices(buf_arr, f_buf, *, logger=None) -> tuple:
@@ -187,10 +193,24 @@ class Minion:
 
         self.logger.debug("Minion: Initialized ENV.")
 
-        # set up data broadcasting to GUI
-        ctx = zmq.Context()
-        self.pub = ctx.socket(zmq.PUB)
-        self.pub.bind("ipc:///tmp/engine.ipc")
+        # set up data broadcasting to GUI (optional)
+        self.pub = None
+        self.zmq_ctx = None
+        enable_zmq = self.config.env_config.get("enable_zmq", True)
+        if enable_zmq and zmq_available and zmq is not None:
+            try:
+                self.zmq_ctx = zmq.Context()
+                self.pub = self.zmq_ctx.socket(zmq.PUB)
+                self.pub.bind("ipc:///tmp/engine.ipc")
+                self.logger.info("ZMQ publisher initialized for GUI communication")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize ZMQ publisher: {e}. Continuing without ZMQ.")
+                self.pub = None
+                self.zmq_ctx = None
+        elif enable_zmq and not zmq_available:
+            self.logger.warning("ZMQ requested but not available (zmq not installed). Continuing without ZMQ.")
+        else:
+            self.logger.debug("ZMQ disabled via config")
 
         # start count
         self.batch_count = 0
@@ -225,7 +245,8 @@ class Minion:
             "delta in minion": float(diff),
         }
         # self.logger.debug(f"Minion (train_and_eval_sequence): eval msg: {msg}.")
-        self.pub.send_json(msg)
+        if self.pub is not None:
+            self.pub.send_json(msg)
 
         self.old_policy_output = out_new
 
@@ -259,7 +280,10 @@ class Minion:
         if self.f_buf[1] == 1 and self.f_buf[0] == 0:
             self.logger.debug("Minion: Updating ort session weights...")
             self.f_buf[0] = 1  # set lock flag to locked
+            tic = time.time()
             self.ort_session, self.input_names, self.output_names = self._get_ort_session()  # get ort session with new weights
+            toc = time.time()
+            self.logger.debug(f"Minion: Time to update ort weights is {(toc - tic)*1000:0.4f}ms")
 
             # check if policy changed
             try:
@@ -463,12 +487,16 @@ class Minion:
 
             # self.logger.debug(f"Minion: obs_for_model: {obs_for_model}")
 
+            tic2 = time.time()
             try:
                 # inference pass through actor network
                 # first [0] -> selects "output". second [0] -> selects 0th batch
                 net_out = self._ort_session_run(self.ort_session, obs_for_model)[0][0]
             except Exception as e:
                 raise RuntimeError(f"Could not perform action inference due to error {e}")
+
+            toc2 = time.time()
+            # self.logger.debug(f"Minion time for inference only is {(toc2 - tic2)*1000:0.4f}ms")
 
             # self.logger.debug(f"Minion: performed action inference, net_out={net_out}, type={type(net_out)}")
 
@@ -518,8 +546,12 @@ class Minion:
 
         for i in range(int(train_batches * self.episode_shm_properties["BATCH_SIZE"])):
             # self.logger.debug(f"Minion: in loop to collect batch, iter={i}")
+            tic = time.time()
             obs, action, reward, terminated, truncated, logp, net_out, info = (
                 self.collect_rollouts(initial_obs=obs))
+            toc = time.time()
+            # self.logger.debug(f"Minion: time to collect full rollout is {(toc - tic)*1000:0.4f}ms")
+
 
             # self.logger.debug(f"Minion (train_and_eval_sequence): received new rollout.")
             # self.logger.debug(f"Minion (train_and_eval_sequence): obs: {obs}.")
@@ -552,10 +584,11 @@ class Minion:
                 "target": float(obs)
             }
             # self.logger.debug(f"Minion (train_and_eval_sequence): msg: {msg}.")
-            try:
-                self.pub.send_json(msg)
-            except Exception as e:
-                self.logger.debug(f"Minion (train_and_eval_sequence): {e}")
+            if self.pub is not None:
+                try:
+                    self.pub.send_json(msg)
+                except Exception as e:
+                    self.logger.debug(f"Minion (train_and_eval_sequence): {e}")
 
             # self.logger.debug(f"Minion (train_and_eval_sequence): sent to GUI.")
 
@@ -574,7 +607,8 @@ class Minion:
                 "target": float(obs)
             }
             # self.logger.debug(f"Minion (train_and_eval_sequence): eval msg: {msg}.")
-            self.pub.send_json(msg)
+            if self.pub is not None:
+                self.pub.send_json(msg)
 
 
 def main(policy_shm_name: str,

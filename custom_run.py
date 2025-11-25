@@ -7,7 +7,6 @@ import pprint
 import random
 import re
 import time
-import zmq
 import gzip
 import base64
 import struct
@@ -60,6 +59,14 @@ import logging
 import logging_setup
 
 from custom_callbacks import walk_keys
+
+# Try to import zmq, but make it optional
+try:
+    import zmq
+    zmq_available = True
+except ImportError:
+    zmq_available = False
+    zmq = None
 
 
 def on_sigterm(signum, frame):
@@ -180,6 +187,12 @@ def run_rllib_shared_memory(
 
     logger = logging.getLogger("MyRLApp.custom_runner")
     logger.info(f"custom_runner, PID={os.getpid()}")
+
+    # Pin to CPU core if specified
+    if args.cpu_core_learner is not None:
+        from ray_primitives import pin_to_core
+        pin_to_core(args.cpu_core_learner)
+        logger.info(f"Pinned learner process to CPU core {args.cpu_core_learner}")
 
     # pass main driver PID down to EnvRunner
 
@@ -331,7 +344,7 @@ def run_rllib_shared_memory(
         # flag buffer has 4 flags:
         #   0 -> weights lock flag (locked_state=1)
         #   1 -> weights available flag (true_state=1)
-        #   2 -> minion data collection flag (has it started collecting data, true_state=1)
+        #   2 -> minion data collection flag (has it started collecting data?, true_state=1)
         #   3 -> episode buffer lock flag (needed because of race conditions with reading and writing, locked_state=1)
         f_shm = shared_memory.SharedMemory(
             create=True,
@@ -436,10 +449,23 @@ def run_rllib_shared_memory(
         dist_cls = module.get_inference_action_dist_cls()
         logger.debug(f"policy dist_class: {dist_cls}, {dist_cls.__name__}")
 
-        # set up data broadcasting to GUI
-        ctx = zmq.Context()
-        pub = ctx.socket(zmq.PUB)
-        pub.bind("ipc:///tmp/training.ipc")
+        # set up data broadcasting to GUI (optional)
+        pub = None
+        ctx = None
+        if args.enable_zmq and zmq_available and zmq is not None:
+            try:
+                ctx = zmq.Context()
+                pub = ctx.socket(zmq.PUB)
+                pub.bind("ipc:///tmp/training.ipc")
+                logger.info("ZMQ publisher initialized for GUI communication")
+            except Exception as e:
+                logger.warning(f"Failed to initialize ZMQ publisher: {e}. Continuing without ZMQ.")
+                pub = None
+                ctx = None
+        elif args.enable_zmq and not zmq_available:
+            logger.warning("ZMQ requested but not available (zmq not installed). Continuing without ZMQ.")
+        else:
+            logger.debug("ZMQ disabled via --enable-zmq flag")
 
         try:
             # start counter
@@ -478,7 +504,8 @@ def run_rllib_shared_memory(
                         "ratio_max": float(results["env_runners"]["ratio_max"]),
                     }
                     # send results to be logged in the GUI
-                    pub.send_json(msg)
+                    if pub is not None:
+                        pub.send_json(msg)
 
                     logger.debug(f'ratio_max={results["env_runners"]["ratio_max"]}, '
                                  f'ratio_p99={results["env_runners"]["ratio_p99"]}, '
@@ -527,7 +554,8 @@ def run_rllib_shared_memory(
                 print()
 
                 # send results to be logged in the GUI
-                pub.send_json(msg)
+                if pub is not None:
+                    pub.send_json(msg)
 
                 # increment counter
                 train_iter += 1

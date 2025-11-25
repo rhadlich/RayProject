@@ -98,8 +98,8 @@ if __name__ == "__main__":
         # non-discrete action space, need mean and standard deviation of the distribution instead of logits
         action_dist_size = 2*action_space.shape[0]
 
-    # Define name and properties of episode ring buffer to pass down to EnvRunner
-    # define the size of each rollout tuple
+    # Define name and properties of episode ring buffer to pass down to EnvRunner.
+    # Define the size of each rollout tuple.
     bytes_per_float = np.dtype("float32").itemsize  # number of bytes in rollout data type
     dims = {
         "action": 2,
@@ -168,6 +168,9 @@ if __name__ == "__main__":
                         "mprr_space": mprr_space,
                         "obs_is_discrete": obs_is_discrete,
                         "env_type": args.env_type.lower(),
+                        "cpu_core_env_runner": args.cpu_core_env_runner,
+                        "cpu_core_minion": args.cpu_core_minion,
+                        "enable_zmq": args.enable_zmq,
                         },
         )
         .env_runners(

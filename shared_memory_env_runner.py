@@ -73,6 +73,14 @@ def _run_minion(policy_shm_name: str,
     """
     logger.debug("IN _RUN_MINION NOW.")
     logger.debug(f"_run_minion called by PID: {os.getpid()}")
+    
+    # Pin to CPU core if specified
+    cpu_core_minion = config.env_config.get("cpu_core_minion")
+    if cpu_core_minion is not None:
+        from ray_primitives import pin_to_core
+        pin_to_core(cpu_core_minion)
+        logger.info(f"Pinned minion process to CPU core {cpu_core_minion}")
+    
     minion.main(policy_shm_name, flag_shm_name, ep_shm_name, config)
 
 
@@ -118,6 +126,13 @@ class SharedMemoryEnvRunner(EnvRunner, Checkpointable):
 
         self.logger = logging.getLogger("MyRLApp.EnvRunner")
         self.logger.info(f"SharedMemoryEnvRunner, PID={os.getpid()}")
+
+        # Pin to CPU core if specified
+        cpu_core_env_runner = self.config.env_config.get("cpu_core_env_runner")
+        if cpu_core_env_runner is not None:
+            from ray_primitives import pin_to_core
+            pin_to_core(cpu_core_env_runner)
+            self.logger.info(f"Pinned EnvRunner process to CPU core {cpu_core_env_runner}")
 
         self.worker_index: int = kwargs.get("worker_index")
         self.spaces = kwargs.get("spaces", {})

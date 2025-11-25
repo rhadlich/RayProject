@@ -288,6 +288,40 @@ def custom_args(
     parser.add_argument("--num-cpus", type=int, default=0)
     parser.add_argument("--num-gpus", type=int, default=0)
     parser.add_argument(
+        "--cpu-core-learner",
+        type=int,
+        default=None,
+        help="CPU core ID to pin the learner process to (0-indexed). Only works on Linux.",
+    )
+    parser.add_argument(
+        "--cpu-core-env-runner",
+        type=int,
+        default=None,
+        help="CPU core ID to pin the EnvRunner process to (0-indexed). Only works on Linux.",
+    )
+    parser.add_argument(
+        "--cpu-core-minion",
+        type=int,
+        default=None,
+        help="CPU core ID to pin the minion process to (0-indexed). Only works on Linux.",
+    )
+    def str_to_bool(v):
+        if isinstance(v, bool):
+            return v
+        if v.lower() in ('yes', 'true', 't', 'y', '1', 'on'):
+            return True
+        elif v.lower() in ('no', 'false', 'f', 'n', '0', 'off'):
+            return False
+        else:
+            raise argparse.ArgumentTypeError('Boolean value expected.')
+    
+    parser.add_argument(
+        "--enable-zmq",
+        type=str_to_bool,
+        default=False,
+        help="Enable ZMQ publishing for GUI communication (default: False when running Master.py directly).",
+    )
+    parser.add_argument(
         "--local-mode",
         action="store_true",
         help="Init Ray in local mode for easier debugging.",
